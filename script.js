@@ -14,28 +14,44 @@ function setSymbolStyle(element,value){
 function digits(a){
  ["d1","d2","d3"].forEach((id,i)=>{const track=$("track"+(i+1));track.replaceChildren();const el=document.createElement("span");el.id=id;el.textContent=a[i];setSymbolStyle(el,a[i]);track.appendChild(el);track.style.transform="translateY(0)";});
 }
-// Uploaded sound effect, played once each time a reel stops.
-const stopSoundUrl="reel-stop.mp3";
-function playStopSound(){
- if(!sound)return;
- try{
-  const clip=new Audio(stopSoundUrl);
-  clip.volume=0.22;
-  clip.play().catch(err=>console.warn("停止音を再生できませんでした",err));
- }catch(err){console.warn("停止音の読み込みに失敗しました",err);}
+// iPhone Chrome / Safari: preload and unlock short effects via one Web Audio context.
+// BGM and pre-alert remain on their existing players.
+const effectAudio={ctx:null,buffers:{},loading:null,urls:{stop:"reel-stop.mp3",jackpot:"jackpot-sound.mp3"},volumes:{stop:0.22,jackpot:0.5}};
+function ensureEffectContext(){
+ const AudioContextType=window.AudioContext||window.webkitAudioContext;
+ if(!AudioContextType)return null;
+ if(!effectAudio.ctx)effectAudio.ctx=new AudioContextType();
+ return effectAudio.ctx;
 }
-// Play the supplied jackpot voice only after all three symbols have stopped.
-const jackpotSound=new Audio("jackpot-sound.mp3");
-jackpotSound.preload="auto";
-jackpotSound.volume=0.5; // Jackpot voice: 70% -> 50%.
-function playJackpotSound(){
- if(!sound)return;
+function unlockEffects(){
  try{
-  jackpotSound.pause();
-  jackpotSound.currentTime=0;
-  jackpotSound.play().catch(err=>console.warn("大当たり音声を再生できませんでした",err));
- }catch(err){console.warn("大当たり音声エラー",err);}
+  const ctx=ensureEffectContext();if(!ctx)return;
+  // Called synchronously inside the RUSH START / manual / auto button gesture.
+  if(ctx.state!=="running")ctx.resume().catch(e=>console.warn("音声の有効化待ち",e));
+  if(!effectAudio.loading){
+   effectAudio.loading=Promise.all(Object.entries(effectAudio.urls).map(async ([key,url])=>{
+    try{const response=await fetch(url);if(!response.ok)throw new Error(url+" HTTP "+response.status);
+     const bytes=await response.arrayBuffer();
+     effectAudio.buffers[key]=await ctx.decodeAudioData(bytes);
+    }catch(err){console.warn("効果音の読み込みに失敗",key,err);}
+   }));
+  }
+ }catch(err){console.warn("音声初期化エラー",err);}
 }
+function playEffect(key){
+ if(!sound)return;
+ const ctx=effectAudio.ctx,buffer=effectAudio.buffers[key];
+ if(!ctx||!buffer){unlockEffects();return;}
+ if(ctx.state!=="running")ctx.resume().catch(()=>{});
+ try{
+  const source=ctx.createBufferSource(),gain=ctx.createGain();
+  source.buffer=buffer;gain.gain.value=effectAudio.volumes[key];
+  source.connect(gain);gain.connect(ctx.destination);source.start(0);
+  source.onended=()=>{source.disconnect();gain.disconnect();};
+ }catch(err){console.warn("効果音再生エラー",key,err);}
+}
+function playStopSound(){playEffect("stop");}
+function playJackpotSound(){playEffect("jackpot");}
 // Independent 40%-reliability pre-alert. Color does not determine the alert.
 // P(hit | alert) = 40% for base hit rates below 40% (Bayes' rule).
 const prealertSound=new Audio("prealert.mp3");
@@ -316,8 +332,8 @@ async function showFinal(out,ms){
 }
 
 async function animation(out){await showFinal(out,950);}
-async function step(){if(!active||busy)return;resumeRushMedia();busy=true;controls();const out=draw();logSpin(out);await animation(out);await settleHolds(out);stats();if(!out.hit&&remaining<=0)end();else{ui.message.textContent=out.hit?"RUSH CONTINUE":"READY";ui.sub.textContent=out.hit?"NEXT ROUND":"次の変動へ";}busy=false;controls();}
-function start(){if(busy)return;prealertEnabled=$("prealertEnabled").checked;
+async function step(){if(!active||busy)return;unlockEffects();resumeRushMedia();busy=true;controls();const out=draw();logSpin(out);await animation(out);await settleHolds(out);stats();if(!out.hit&&remaining<=0)end();else{ui.message.textContent=out.hit?"RUSH CONTINUE":"READY";ui.sub.textContent=out.hit?"NEXT ROUND":"次の変動へ";}busy=false;controls();}
+function start(){if(busy)return;unlockEffects();prealertEnabled=$("prealertEnabled").checked;
  prealertTarget=Number($("prealertRate").value);const v=parse();preview();if(!v)return;stopRushVideo();bgmStop();document.getElementById("appRoot").classList.replace("setup-mode","play-mode");window.scrollTo({top:0,behavior:"instant"});spec=v;remaining=v.s+v.e;chain=0;total=0;spinsDone=0;roundSpins=0;autoRunning=false;autoToken++;$("historyLog").innerHTML="";$("progress").textContent="消化回転数：0";active=true;holdQueue=[];pendingPrealerts=0;refill();pendingPrealerts=0;ui.result.innerHTML='最高記録：<span id="best"></span>';ui.best=$("best");updateBest();ui.message.textContent="RUSH START";ui.sub.textContent="図柄が上から下へ流れて停止";ui.digits.classList.remove("win");digits(["–","–","–"]);stats();controls();note(550,.2);}
 function fast(){if(!active||busy)return;pendingPrealerts=0;busy=true;controls();let iterations=0;while(active){const out=draw();logSpin(out);iterations++;if(out.hit){ui.message.textContent="BONUS";ui.sub.textContent=`+ ${out.balls.toLocaleString()} BALLS`; }if(!out.hit&&remaining<=0)break;if(iterations>1000000){ui.error.textContent="安全のため100万回転で処理を停止しました。";break;}}pendingPrealerts=0;digits([String(rand(9)+1),String(rand(9)+1),String(rand(9)+1)]);stats();end();busy=false;controls();}
 $("add").onclick=()=>{if(ui.payouts.children.length>=12)return;const row=document.createElement("div");row.className="row";row.innerHTML='<input aria-label="出玉" type="number" min="0" value="1500"><input aria-label="割合" type="number" min="0" value="0"><span>%</span>';ui.payouts.append(row);preview();};
@@ -325,7 +341,7 @@ function logSpin(out){$("progress").textContent=`消化回転数：${spinsDone.t
 async function autoPlay(){
  if(autoRunning){autoRunning=false;autoToken++;pauseRushMedia();controls();return;}
  if(!active||busy)return;
- resumeRushMedia();
+ unlockEffects();resumeRushMedia();
  autoRunning=true;
  const token=++autoToken;
  controls();
@@ -349,7 +365,7 @@ async function autoPlay(){
  }
 }
 
-ui.start.onclick=start;ui.spin.onclick=step;ui.auto.onclick=autoPlay;$("instant").onclick=fast;$("clearHistory").onclick=()=>{$("historyLog").innerHTML="";};ui.sound.onclick=()=>{sound=!sound;ui.sound.textContent=`SOUND: ${sound?"ON":"OFF"}`;if(sound)note(700);};document.querySelectorAll("input").forEach(x=>x.addEventListener("input",preview));ui.payouts.addEventListener("input",preview);preview();updateBest();updateHud();controls();
+ui.start.onclick=start;ui.spin.onclick=step;ui.auto.onclick=autoPlay;$("instant").onclick=fast;$("clearHistory").onclick=()=>{$("historyLog").innerHTML="";};ui.sound.onclick=()=>{sound=!sound;ui.sound.textContent=`SOUND: ${sound?"ON":"OFF"}`;if(sound){unlockEffects();note(700);}};document.querySelectorAll("input").forEach(x=>x.addEventListener("input",preview));ui.payouts.addEventListener("input",preview);preview();updateBest();updateHud();controls();
 
 // Two-stage experience: setup first, then immersive large RUSH screen.
 $("backSettings").onclick=()=>{
